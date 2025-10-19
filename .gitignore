@@ -1,0 +1,11 @@
+/backups
+/files schema.txt
+/fix1.py
+/install.bat
+/logs
+/run.bat
+/setup_databases.py
+/trading_system.db-shm
+/trading_system.db-wal
+/verify_database_integrity.py
+/__pycache__
