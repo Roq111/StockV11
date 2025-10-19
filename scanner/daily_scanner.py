@@ -171,6 +171,7 @@ class DailyScanner:
             logger.error(f"Error in setup_scan_tables: {e}")
     
     def scan(self, portfolio_name: str = "default") -> List[Dict]:
+        return self.scan_with_optimized_config(portfolio_name)
         """Run daily scan"""
         logger.info(f"Starting daily scan for portfolio: {portfolio_name}")
         
@@ -876,7 +877,290 @@ class DailyScanner:
                 emoji = "📈" if signal['type'] == 'BUY' else "📉"
                 print(f"  {i}. {emoji} {signal['symbol']}: {signal['type']} "
                       f"(Strength: {signal['strength']:.2f}) - {signal['reason']}")
+
+    def scan_with_optimized_config(self, portfolio_name='default'):
+        """Enhanced scan using optimized configuration from database"""
+        logger.info(f"Starting optimized scan for portfolio: {portfolio_name}")
+        
+        # Load optimized configuration
+        config = self.load_optimized_configuration()
+        
+        if config['is_optimized']:
+            logger.info(f"Using OPTIMIZED config - Score: {config.get('score', 0):.2f}")
+        else:
+            logger.info("Using DEFAULT configuration")
+        
+        # Get stocks to scan
+        stocks = self._get_scannable_stocks()
+        
+        if not stocks:
+            logger.warning("No stocks found to scan")
+            return []
+        
+        all_signals = []
+        
+        for i, symbol in enumerate(stocks, 1):
+            if i % 10 == 0:
+                logger.info(f"Progress: {i}/{len(stocks)}")
+            
+            try:
+                # Analyze with optimized parameters
+                signals = self._analyze_stock_with_config(symbol, config)
                 
+                for signal in signals:
+                    # Calculate weighted score
+                    score = self._calculate_weighted_score(signal, config)
+                    signal['weighted_score'] = score
+                    
+                    # Filter by minimum score
+                    if score >= config.get('min_entry_score', 70):
+                        # Apply optimized stop loss and take profit
+                        if signal['type'] == 'BUY':
+                            signal['stop_loss'] = round(signal['price'] * (1 - config.get('stop_loss_pct', 0.05)), 2)
+                            signal['take_profit'] = round(signal['price'] * (1 + config.get('profit_target_pct', 0.10)), 2)
+                        
+                        all_signals.append(signal)
+                        
+            except Exception as e:
+                logger.debug(f"Error scanning {symbol}: {e}")
+        
+        # Sort by weighted score
+        all_signals.sort(key=lambda x: x.get('weighted_score', 0), reverse=True)
+        
+        logger.info(f"Scan complete: {len(all_signals)} signals found")
+        return all_signals
+
+    def load_optimized_configuration(self):
+        """Load optimized configuration from trading_configs table"""
+        try:
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Check if table exists
+                cursor.execute("""
+                    SELECT name FROM sqlite_master 
+                    WHERE type='table' AND name='trading_configs'
+                """)
+                
+                if not cursor.fetchone():
+                    logger.warning("trading_configs table not found, using defaults")
+                    return self._get_default_config()
+                
+                # Get active configuration
+                cursor.execute("""
+                    SELECT parameters, performance_score, total_return, sharpe_ratio, created_at
+                    FROM trading_configs
+                    WHERE is_active = 1
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """)
+                
+                result = cursor.fetchone()
+                
+                if result:
+                    import json
+                    config = json.loads(result[0]) if isinstance(result[0], str) else result[0]
+                    config['is_optimized'] = True
+                    config['score'] = result[1] if result[1] else 0
+                    config['return'] = result[2] if result[2] else 0
+                    config['sharpe'] = result[3] if result[3] else 0
+                    
+                    logger.info(f"Loaded optimized config - Score: {config['score']:.2f}, Return: {config['return']:.2%}")
+                    return config
+                else:
+                    logger.info("No active configuration, using defaults")
+                    return self._get_default_config()
+                    
+        except Exception as e:
+            logger.error(f"Error loading configuration: {e}")
+            return self._get_default_config()
+
+    def _get_default_config(self):
+        """Get default configuration"""
+        return {
+            'is_optimized': False,
+            'min_entry_score': 70.0,
+            'min_confidence': 0.65,
+            'max_positions': 10,
+            'max_position_pct': 0.10,
+            'stop_loss_pct': 0.05,
+            'profit_target_pct': 0.10,
+            'trailing_stop_pct': 0.03,
+            'rsi_oversold': 30,
+            'rsi_overbought': 70,
+            'macd_threshold': 0.0,
+            'volume_spike_threshold': 2.0,
+            'bb_period': 20,
+            'bb_std': 2,
+            'technical_weight': 0.40,
+            'momentum_weight': 0.25,
+            'volume_weight': 0.15,
+            'sentiment_weight': 0.10,
+            'fundamental_weight': 0.10
+        }
+
+    def _analyze_stock_with_config(self, symbol, config):
+        """Analyze stock using optimized configuration parameters"""
+        signals = []
+        
+        try:
+            # Get price data
+            df = self._get_price_data(symbol)
+            
+            if df is None or len(df) < 50:
+                return signals
+            
+            # Calculate indicators (using your existing function)
+            indicators = self.indicators.calculate_all(df)
+            
+            latest = df.iloc[-1]
+            
+            # RSI with OPTIMIZED thresholds
+            rsi_oversold = config.get('rsi_oversold', 30)
+            rsi_overbought = config.get('rsi_overbought', 70)
+            
+            if 'rsi' in indicators and not pd.isna(indicators['rsi'].iloc[-1]):
+                rsi_value = indicators['rsi'].iloc[-1]
+                
+                if rsi_value < rsi_oversold:
+                    signals.append({
+                        'symbol': symbol,
+                        'type': 'BUY',
+                        'indicator': 'RSI',
+                        'value': round(rsi_value, 2),
+                        'reason': f'RSI oversold at {rsi_value:.1f} (threshold: {rsi_oversold})',
+                        'strength': round((rsi_oversold - rsi_value) / rsi_oversold, 2),
+                        'price': round(latest['close'], 2),
+                        'indicator_type': 'technical'
+                    })
+                elif rsi_value > rsi_overbought:
+                    signals.append({
+                        'symbol': symbol,
+                        'type': 'SELL',
+                        'indicator': 'RSI',
+                        'value': round(rsi_value, 2),
+                        'reason': f'RSI overbought at {rsi_value:.1f} (threshold: {rsi_overbought})',
+                        'strength': round((rsi_value - rsi_overbought) / (100 - rsi_overbought), 2),
+                        'price': round(latest['close'], 2),
+                        'indicator_type': 'technical'
+                    })
+            
+            # MACD with optimized threshold
+            macd_threshold = config.get('macd_threshold', 0.0)
+            
+            if all(col in indicators.columns for col in ['macd', 'macd_signal']):
+                macd = indicators['macd'].iloc[-1]
+                macd_signal = indicators['macd_signal'].iloc[-1]
+                
+                if not pd.isna(macd) and not pd.isna(macd_signal):
+                    # Check for crossover
+                    if len(indicators) > 1:
+                        prev_macd = indicators['macd'].iloc[-2]
+                        prev_signal = indicators['macd_signal'].iloc[-2]
+                        
+                        if prev_macd <= prev_signal and macd > macd_signal and macd > macd_threshold:
+                            signals.append({
+                                'symbol': symbol,
+                                'type': 'BUY',
+                                'indicator': 'MACD',
+                                'value': round(macd - macd_signal, 4),
+                                'reason': f'MACD bullish crossover above {macd_threshold}',
+                                'strength': round(min(1.0, abs(macd - macd_signal) * 50), 2),
+                                'price': round(latest['close'], 2),
+                                'indicator_type': 'momentum'
+                            })
+            
+            # Volume spike with optimized threshold
+            volume_threshold = config.get('volume_spike_threshold', 2.0)
+            
+            if 'volume' in df.columns:
+                avg_volume = df['volume'].rolling(20).mean().iloc[-1]
+                current_volume = df['volume'].iloc[-1]
+                
+                if avg_volume > 0:
+                    volume_ratio = current_volume / avg_volume
+                    
+                    if volume_ratio > volume_threshold:
+                        price_change = (latest['close'] - df['close'].iloc[-2]) / df['close'].iloc[-2] * 100
+                        
+                        if abs(price_change) > 2:
+                            signals.append({
+                                'symbol': symbol,
+                                'type': 'BUY' if price_change > 0 else 'SELL',
+                                'indicator': 'VOLUME',
+                                'value': round(volume_ratio, 2),
+                                'reason': f'Volume spike {volume_ratio:.1f}x (threshold: {volume_threshold}x)',
+                                'strength': round(min(1.0, volume_ratio / (volume_threshold * 2)), 2),
+                                'price': round(latest['close'], 2),
+                                'indicator_type': 'volume'
+                            })
+            
+            # Bollinger Bands with optimized parameters
+            bb_period = int(config.get('bb_period', 20))
+            bb_std = config.get('bb_std', 2)
+            
+            if all(col in indicators.columns for col in ['bb_upper', 'bb_lower']):
+                bb_upper = indicators['bb_upper'].iloc[-1]
+                bb_lower = indicators['bb_lower'].iloc[-1]
+                
+                if not pd.isna(bb_upper) and not pd.isna(bb_lower):
+                    if latest['close'] <= bb_lower:
+                        signals.append({
+                            'symbol': symbol,
+                            'type': 'BUY',
+                            'indicator': 'BB',
+                            'value': round((bb_lower - latest['close']) / latest['close'] * 100, 2),
+                            'reason': f'Price at lower BB (period: {bb_period}, std: {bb_std})',
+                            'strength': round(min(1.0, (bb_lower - latest['close']) / latest['close'] * 10), 2),
+                            'price': round(latest['close'], 2),
+                            'indicator_type': 'technical'
+                        })
+                    elif latest['close'] >= bb_upper:
+                        signals.append({
+                            'symbol': symbol,
+                            'type': 'SELL',
+                            'indicator': 'BB',
+                            'value': round((latest['close'] - bb_upper) / latest['close'] * 100, 2),
+                            'reason': f'Price at upper BB (period: {bb_period}, std: {bb_std})',
+                            'strength': round(min(1.0, (latest['close'] - bb_upper) / latest['close'] * 10), 2),
+                            'price': round(latest['close'], 2),
+                            'indicator_type': 'technical'
+                        })
+                        
+        except Exception as e:
+            logger.debug(f"Error analyzing {symbol}: {e}")
+        
+        return signals
+
+    def _calculate_weighted_score(self, signal, config):
+        """Calculate weighted score using optimized weights"""
+        
+        # Map indicator types to weights
+        weight_map = {
+            'technical': config.get('technical_weight', 0.4),
+            'momentum': config.get('momentum_weight', 0.25),
+            'volume': config.get('volume_weight', 0.15),
+            'sentiment': config.get('sentiment_weight', 0.1),
+            'fundamental': config.get('fundamental_weight', 0.1)
+        }
+        
+        indicator_type = signal.get('indicator_type', 'technical')
+        weight = weight_map.get(indicator_type, 0.2)
+        
+        # Get signal strength
+        strength = signal.get('strength', 0.5)
+        
+        # Calculate weighted score (0-100 scale)
+        weighted_score = strength * weight * 100
+        
+        # Add confidence boost if available
+        if 'confidence' in signal:
+            confidence = signal['confidence']
+            if confidence >= config.get('min_confidence', 0.65):
+                weighted_score *= (1 + (confidence - 0.5))
+        
+        return round(weighted_score, 2)
+
     def load_optimized_configuration(self):
         """Load optimized configuration from database"""
         try:
