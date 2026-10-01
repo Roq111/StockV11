@@ -43,10 +43,10 @@ TWIST = math.radians(150)     # rotation of each strut over the body length
 # v = Q / (Cd * A_total). ~20-25 mm2 gives >10 m/s at 10 L/min (see engineering_check()).
 JET_D = 0.8                   # printable on FDM with a 0.4 nozzle
 JET_BAND = 10.0               # mm: height of each coverage band along the body
-JETS_PER_BAND = 4             # jets per band, spread around the circumference
+JETS_PER_BAND = 5             # jets per band, spread around the circumference
 JET_Z_MAX = 160.0             # above this the struts are bunched into the neck
 JET_CLEAR = 7.0               # pre-filter: skip spots this close to a crossing strut
-RING_JETS_PER_ROW = 10        # ring has 2 staggered horizontal rows
+RING_JETS_PER_ROW = 14        # ring has 2 staggered horizontal rows
 RING_JET_Z = (-2.0, 2.0)          # both inside the ring channel height
 
 # suction-cup keyhole pads (for mushroom-head cups: head ≤7 mm, neck ≤4 mm)
