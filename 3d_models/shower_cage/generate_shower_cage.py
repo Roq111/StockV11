@@ -41,12 +41,11 @@ TWIST = math.radians(150)     # rotation of each strut over the body length
 
 # High pressure needs a SMALL total jet area: at a fixed supply flow the jet speed is
 # v = Q / (Cd * A_total). ~20-25 mm2 gives >10 m/s at 10 L/min (see engineering_check()).
-JET_D = 0.8                   # printable on FDM with a 0.4 nozzle
-JET_BAND = 10.0               # mm: height of each coverage band along the body
-JETS_PER_BAND = 5             # jets per band, spread around the circumference
+JET_D = 0.7
+N_JETS = 124                  # spread evenly over the inner surface (farthest-point sampling)
+JET_BAND = 10.0               # mm: height band used by the coverage check
 JET_Z_MAX = 160.0             # above this the struts are bunched into the neck
 JET_CLEAR = 7.0               # pre-filter: skip spots this close to a crossing strut
-RING_JETS_PER_ROW = 14        # ring has 2 staggered horizontal rows
 RING_JET_Z = (-2.0, 2.0)          # both inside the ring channel height
 
 # suction-cup keyhole pads (for mushroom-head cups: head ≤7 mm, neck ≤4 mm)
@@ -236,7 +235,7 @@ def main():
         seg = np.linalg.norm(np.diff(p, axis=0), axis=1)
         s = np.concatenate([[0], np.cumsum(seg)])
         others = np.vstack([q for qi, q in enumerate(paths) if qi != pi] + [ring])
-        for sv in np.arange(3.0, s[-1] - 8, 3.0):
+        for sv in np.arange(3.0, s[-1] - 8, 1.5):
             c = np.array([np.interp(sv, s, p[:, i]) for i in range(3)])
             dists = np.linalg.norm(others - c, axis=1)
             if c[2] > JET_Z_MAX:
@@ -253,44 +252,35 @@ def main():
             inward -= np.dot(inward, tan_v) * tan_v
             cands.append((c, inward / np.linalg.norm(inward)))
 
-    # even coverage of the whole inside: every height band gets JETS_PER_BAND jets spread
-    # around the circumference (band start angle advances by the golden angle)
-    jets, jet_pts = [], []
-    golden = math.pi * (3 - math.sqrt(5))
-    z_edges = np.arange(5.0, JET_Z_MAX + 1e-6, JET_BAND)
-    for b, (z_lo, z_hi) in enumerate(zip(z_edges[:-1], z_edges[1:])):
-        band = [cd for cd in cands if z_lo <= cd[0][2] < z_hi]
-        used, rejected = [], set()
-        for k in range(JETS_PER_BAND):
-            target = b * golden + 2 * math.pi * k / JETS_PER_BAND
-            best = None
-            for idx, (c, d) in enumerate(band):
-                if idx in used or idx in rejected or any(np.linalg.norm(c - band[u][0]) < 6.0 for u in used):
-                    continue
-                err = abs((math.atan2(c[1], c[0]) - target + math.pi) % (2 * math.pi) - math.pi)
-                if best is None or err < best[0]:
-                    best = (err, idx)
-            while best is not None and not jet_is_clear(solid, *band[best[1]]):
-                rejected.add(best[1])   # tip inside a neighbour strut or spray blocked -> next best
-                best = min(((abs((math.atan2(c[1], c[0]) - target + math.pi) % (2 * math.pi) - math.pi), idx)
-                            for idx, (c, d) in enumerate(band)
-                            if idx not in used and idx not in rejected
-                            and all(np.linalg.norm(c - band[u][0]) >= 6.0 for u in used)), default=None)
-            if best is not None:
-                used.append(best[1])
-                c, d = band[best[1]]
-                jets.append(jet(c, d)); jet_pts.append((c, d))
-    n_strut_jets = len(jets)
-
+    # ring candidates: two horizontal rows on the inner face
     strut_ends = np.array([p[-1] for p in paths])
-    for row, z in enumerate(RING_JET_Z):
-        for k in range(RING_JETS_PER_ROW):
-            a = 2 * math.pi * (k + 0.5 * row) / RING_JETS_PER_ROW
+    for z in RING_JET_Z:
+        for a in np.arange(0, 2 * math.pi, 3.0 / R2):
             c = np.array([R2 * math.cos(a), R2 * math.sin(a), z])
-            if np.min(np.linalg.norm(strut_ends - c, axis=1)) < 3.0:
-                continue
-            d = np.array([-math.cos(a), -math.sin(a), 0.0])
-            jets.append(jet(c, d)); jet_pts.append((c, d))
+            if np.min(np.linalg.norm(strut_ends - c, axis=1)) >= 3.0:
+                cands.append((c, np.array([-math.cos(a), -math.sin(a), 0.0])))
+
+    # even spread over the whole inner surface: farthest-point sampling - every new jet goes
+    # to the candidate spot that is farthest from all jets chosen so far
+    pts = np.array([c for c, _ in cands])
+    start = int(np.argmin(pts[:, 2]))
+    gap = np.full(len(pts), np.inf)
+    jets, jet_pts = [], []
+    while len(jets) < N_JETS:
+        i = start if not jets else int(np.argmax(gap))
+        if not np.isfinite(gap[i]) and jets:
+            break
+        if gap[i] <= 0:
+            print("  ran out of free candidate spots"); break
+        c, d = cands[i]
+        if not jet_is_clear(solid, c, d):
+            gap[i] = 0              # tip inside a neighbour strut or spray blocked -> never pick
+            continue
+        jets.append(jet(c, d)); jet_pts.append((c, d))
+        gap = np.minimum(gap, np.linalg.norm(pts - c, axis=1))
+    n_strut_jets = sum(1 for c, _ in jet_pts if c[2] > RING_JET_Z[1] + 0.5)
+    np.save("candidates.npy", pts)
+
     jet_area = len(jets) * math.pi * (JET_D / 2) ** 2
     print(f"  {len(jets)} jets ({n_strut_jets} on struts, {len(jets) - n_strut_jets} on ring), "
           f"total area {jet_area:.0f} mm2 vs inlet {math.pi * (BORE_D / 2) ** 2:.0f} mm2")
@@ -382,6 +372,15 @@ def verify(solid, voids, jets, jet_pts, pad_cuts):
     empty = [f"{lo:.0f}-{lo + JET_BAND:.0f}" for lo, n in zip(bands[:-1], counts) if n == 0]
     print(f"  jets per {JET_BAND:.0f} mm height band (bottom->top): {counts.tolist()}")
     print("  full-height coverage: " + ("OK, every band has jets" if not empty else "GAPS at z=" + ", ".join(empty)))
+    try:
+        cand = np.load("candidates.npy")
+        jp = np.array([c for c, _ in jet_pts])
+        nn = np.min(np.linalg.norm(cand[:, None, :] - jp[None, :, :], axis=2), axis=1)
+        sp = np.sort(np.linalg.norm(jp[:, None] - jp[None], axis=2), axis=1)[:, 1]
+        print(f"  spacing between neighbouring jets: min {sp.min():.1f}, mean {sp.mean():.1f}, max {sp.max():.1f} mm")
+        print(f"  farthest any inner-surface spot is from a jet: {nn.max():.1f} mm")
+    except FileNotFoundError:
+        pass
     leak = union(pad_cuts) ^ voids
     print("  suction-cup keyholes isolated from water: " + ("OK" if leak.is_empty() else "PROBLEM"))
     ok = not empty and n_cav == 1 and fed == len(jets) and blocked == 0 and leak.is_empty()
