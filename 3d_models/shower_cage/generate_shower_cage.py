@@ -7,7 +7,7 @@ Geometry (all units in mm):
   * Body section 2: Ø110 for 70 mm
   * Lattice of HOLLOW flat (elliptical section) struts, two opposite helix families -> diamond
     pattern, fed from a hub chamber under the thread and closed by a hollow flat bottom ring.
-  * Many Ø0.5 high-pressure jet holes: on the inner side of every strut (pointing at the axis)
+  * Many Ø0.8 high-pressure jet holes: on the inner side of every strut (pointing at the axis)
     and two staggered horizontal rows on the inner face of the ring (pointing at the centre).
   * 7 keyhole pads under the ring for standard mushroom-head suction cups.
 
@@ -41,10 +41,10 @@ TWIST = math.radians(150)     # rotation of each strut over the body length
 
 # High pressure needs a SMALL total jet area: at a fixed supply flow the jet speed is
 # v = Q / (Cd * A_total). ~20-25 mm2 gives >10 m/s at 10 L/min (see engineering_check()).
-JET_D = 0.5
-JET_SPACING = 13.0            # mm along each strut
+JET_D = 0.8                   # printable on FDM with a 0.4 nozzle
+JET_SPACING = 19.0            # mm along each strut
 JET_CLEAR = 9.0               # skip jets this close to a crossing strut
-RING_JETS_PER_ROW = 32        # ring has 2 staggered horizontal rows
+RING_JETS_PER_ROW = 16        # ring has 2 staggered horizontal rows
 RING_JET_Z = (-2.0, 2.0)          # both inside the ring channel height
 
 # suction-cup keyhole pads (for mushroom-head cups: head ≤7 mm, neck ≤4 mm)
