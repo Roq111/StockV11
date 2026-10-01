@@ -7,7 +7,7 @@ Geometry (all units in mm):
   * Body section 2: Ø110 for 70 mm
   * Lattice of HOLLOW flat (elliptical section) struts, two opposite helix families -> diamond
     pattern, fed from a hub chamber under the thread and closed by a hollow flat bottom ring.
-  * Many small high-pressure jet holes: on the inner side of every strut (pointing at the axis)
+  * Many Ø0.5 high-pressure jet holes: on the inner side of every strut (pointing at the axis)
     and two staggered horizontal rows on the inner face of the ring (pointing at the centre).
   * 7 keyhole pads under the ring for standard mushroom-head suction cups.
 
@@ -29,27 +29,30 @@ D2, L2 = 110.0, 70.0          # second section: diameter, length
 BODY_LEN = L1 + L2
 
 # flat struts: thin in the radial direction, wide tangentially
-STRUT_RAD, STRUT_TAN = 3.25, 5.5      # outer semi-axes (6.5 x 11 mm)
-WALL = 1.6
-HUB_R, HUB_LEN = 13.0, 12.0   # solid hub under the thread
-HUB_CHAMBER_R = 9.0
+STRUT_RAD, STRUT_TAN = 3.5, 6.0       # outer semi-axes (7 x 12 mm)
+WALL = 2.0                    # 5 perimeters with a 0.4 nozzle
+HUB_R, HUB_LEN = 14.0, 18.0   # hub under the thread
+HUB_CHAMBER_R = 9.0           # lens-shaped (double-cone) chamber, no flat walls
+STRUT_START = HUB_LEN - 8     # struts start inside the chamber
 NECK_FLARE_END = 60.0         # depth at which the neck reaches Ø60
 
 N_STRUTS = 6                  # per helix direction (12 total)
 TWIST = math.radians(150)     # rotation of each strut over the body length
 
-JET_D = 0.7                   # total jet area kept below the inlet bore area -> high pressure
-JET_SPACING = 10.0            # mm along each strut
+# High pressure needs a SMALL total jet area: at a fixed supply flow the jet speed is
+# v = Q / (Cd * A_total). ~20-25 mm2 gives >10 m/s at 10 L/min (see engineering_check()).
+JET_D = 0.5
+JET_SPACING = 13.0            # mm along each strut
 JET_CLEAR = 9.0               # skip jets this close to a crossing strut
-RING_JETS_PER_ROW = 48        # ring has 2 staggered horizontal rows
-RING_JET_Z = (-2.0, 2.0)
+RING_JETS_PER_ROW = 32        # ring has 2 staggered horizontal rows
+RING_JET_Z = (-2.0, 2.0)          # both inside the ring channel height
 
 # suction-cup keyhole pads (for mushroom-head cups: head ≤7 mm, neck ≤4 mm)
 N_CUPS = 7
 CUP_HEAD_HOLE = 7.5
 CUP_NECK_SLOT = 4.2
 CUP_SLOT_LEN = 6.0
-PAD_TOP, PAD_BOTTOM = -4.5, -13.0
+PAD_TOP, PAD_BOTTOM = -5.0, -13.5
 PAD_SHEET = 2.0               # thickness the mushroom head locks behind
 
 SPHERE_SEGS = 20
@@ -66,12 +69,12 @@ def smoothstep(a, b, x):
 
 def radius_at(t):
     """Centre-line radius at depth t (0 = top of body under thread, BODY_LEN = bottom)."""
-    flare = 6 + (R1 - 6) * smoothstep(HUB_LEN - 4, NECK_FLARE_END, t) ** 0.8
+    flare = 7 + (R1 - 7) * smoothstep(STRUT_START, NECK_FLARE_END, t) ** 0.8
     return flare + (R2 - R1) * smoothstep(L1 - 8, L1 + 18, t)
 
 
 def strut_path(phi0, direction, n=90):
-    ts = np.linspace(HUB_LEN - 4, BODY_LEN, n)
+    ts = np.linspace(STRUT_START, BODY_LEN, n)
     pts = []
     for t in ts:
         r = radius_at(t)
@@ -119,9 +122,17 @@ def oriented_cylinder(c, d, length, radius, segs=12):
     return cyl.transform(np.hstack([R, np.reshape(c, (3, 1))]).tolist())
 
 
+def wall_reach(c, d):
+    """Max distance from the strut centre-line point c to the outer surface along d
+    (support function of the strut's elliptical section)."""
+    er = np.array([c[0], c[1], 0.0]); er /= np.linalg.norm(er)
+    et = np.array([-er[1], er[0], 0.0])
+    return math.sqrt((STRUT_RAD * d @ er) ** 2 + (STRUT_TAN * d @ et) ** 2 + (STRUT_TAN * d[2]) ** 2)
+
+
 def jet(c, d):
     """Ø JET_D hole from the channel centre outward along d (pierces only the inner wall)."""
-    return oriented_cylinder(c, d, STRUT_RAD + 1.5, JET_D / 2)
+    return oriented_cylinder(c, d, wall_reach(c, d) + 1.5, JET_D / 2)
 
 
 def threaded_rod():
@@ -208,12 +219,16 @@ def main():
     print("building water channels ...")
     ci, ct = STRUT_RAD - WALL, STRUT_TAN - WALL
     channels = [flat_tube(p, ci, ct) for p in paths] + [flat_tube(ring, ci, ct)]
-    chamber = Manifold.cylinder(HUB_LEN - 2.5, HUB_CHAMBER_R, HUB_CHAMBER_R, 48).translate((0, 0, BODY_LEN - HUB_LEN + 1.5))
+    z0 = BODY_LEN - HUB_LEN + 2.0     # chamber bottom tip
+    chamber = Manifold.batch_hull([
+        Manifold.cylinder(0.1, 3.0, 3.0, 48).translate((0, 0, z0)),
+        Manifold.cylinder(BODY_LEN - z0 - 11, HUB_CHAMBER_R, HUB_CHAMBER_R, 48).translate((0, 0, z0 + 6)),
+        Manifold.cylinder(0.1, BORE_D / 2, BORE_D / 2, 48).translate((0, 0, BODY_LEN - 1))])
     bore = Manifold.cylinder(THREAD_LEN + 5, BORE_D / 2, BORE_D / 2, 48).translate((0, 0, BODY_LEN - 3))
     voids = union(channels + [chamber, bore])
 
     print("drilling jets ...")
-    jets = []
+    jets, jet_pts = [], []
     for pi, p in enumerate(paths):
         seg = np.linalg.norm(np.diff(p, axis=0), axis=1)
         s = np.concatenate([[0], np.cumsum(seg)])
@@ -222,8 +237,13 @@ def main():
             c = np.array([np.interp(sv, s, p[:, i]) for i in range(3)])
             if np.min(np.linalg.norm(others - c, axis=1)) < JET_CLEAR:
                 continue
+            # point at the axis, but perpendicular to the strut so the hole crosses the wall squarely
+            i = np.searchsorted(s, sv); tan_v = p[min(i, len(p) - 1)] - p[max(i - 1, 0)]
+            tan_v /= np.linalg.norm(tan_v)
             inward = np.array([-c[0], -c[1], 0.0])
-            jets.append(jet(c, inward / np.linalg.norm(inward)))
+            inward -= np.dot(inward, tan_v) * tan_v
+            inward /= np.linalg.norm(inward)
+            jets.append(jet(c, inward)); jet_pts.append((c, inward))
     n_strut_jets = len(jets)
 
     strut_ends = np.array([p[-1] for p in paths])
@@ -233,17 +253,91 @@ def main():
             c = np.array([R2 * math.cos(a), R2 * math.sin(a), z])
             if np.min(np.linalg.norm(strut_ends - c, axis=1)) < 3.0:
                 continue
-            jets.append(jet(c, np.array([-math.cos(a), -math.sin(a), 0.0])))
+            d = np.array([-math.cos(a), -math.sin(a), 0.0])
+            jets.append(jet(c, d)); jet_pts.append((c, d))
     jet_area = len(jets) * math.pi * (JET_D / 2) ** 2
     print(f"  {len(jets)} jets ({n_strut_jets} on struts, {len(jets) - n_strut_jets} on ring), "
           f"total area {jet_area:.0f} mm2 vs inlet {math.pi * (BORE_D / 2) ** 2:.0f} mm2")
 
+    verify(solid, voids, jets, jet_pts, pad_cuts)
+    engineering_check()
+    jet_performance(len(jets))
     result = solid - union([voids] + jets + pad_cuts)
     out = result.to_mesh()
-    tm = trimesh.Trimesh(out.vert_properties[:, :3], out.tri_verts, process=True)
+    tm = trimesh.Trimesh(out.vert_properties[:, :3], out.tri_verts, process=False)
     print("watertight:", tm.is_watertight, "volume cm3: %.1f" % (tm.volume / 1000), "bounds:", tm.bounds.round(1).tolist())
     tm.export(OUT)
     print("saved", OUT)
+
+
+def ellipse_ring_moment(a, b, p, n=2000):
+    """Max bending moment (N*mm/mm) in a thin closed elliptical ring (mid-wall semi-axes a>b)
+    under internal pressure p (MPa). Quarter-ring statics + zero end rotation (Castigliano)."""
+    th = np.linspace(0, math.pi / 2, n)
+    x, y = a * np.cos(th), b * np.sin(th)
+    ds = np.hypot(np.gradient(x), np.gradient(y))
+    m0 = -p * a * (a - x) + p / 2 * ((a - x) ** 2 + y ** 2)   # moment w/o the redundant M_A
+    m_a = -np.sum(m0 * ds) / np.sum(ds)
+    return np.max(np.abs(m0 + m_a))
+
+
+def engineering_check():
+    """Wall stresses at typical / high / extreme household pressure, and jet performance."""
+    print("pressure / strength check (thin-wall theory, PETG):")
+    a, b = STRUT_TAN - WALL / 2, STRUT_RAD - WALL / 2
+    ai, bi = STRUT_TAN - WALL, STRUT_RAD - WALL
+    r_root = THREAD_MAJOR_D / 2 - 0.640327 * THREAD_PITCH
+    ri = BORE_D / 2
+    layer_strength = 25.0          # MPa, PETG across layers (weakest direction), conservative
+    for bar in (3, 6, 10):
+        p = bar / 10.0
+        sig_strut = 6 * ellipse_ring_moment(a, b, p) / WALL ** 2 + p * ai / WALL
+        sig_neck = p * (r_root ** 2 + ri ** 2) / (r_root ** 2 - ri ** 2)
+        hose_pull = p * math.pi * (THREAD_MAJOR_D / 2) ** 2 / (math.pi * (r_root ** 2 - ri ** 2))
+        worst = max(sig_strut, sig_neck, hose_pull)
+        print(f"  {bar:>2} bar: strut/ring wall {sig_strut:5.1f} MPa, thread neck {sig_neck:4.1f} MPa, "
+              f"hose pull {hose_pull:4.1f} MPa -> safety factor {layer_strength / worst:4.1f}")
+    print("flow check:")
+    ch = math.pi * ai * bi
+    print(f"  channel area {12 * ch:.0f} mm2 (12 struts) vs inlet {math.pi * ri ** 2:.0f} mm2 "
+          f"-> water speed inside channels stays low, all jets get ~the same pressure")
+
+
+def jet_performance(n_jets):
+    a_tot = n_jets * math.pi * (JET_D / 2) ** 2
+    cd = 0.62
+    for lpm in (8, 10, 12):
+        q = lpm / 60000.0
+        v = q / (cd * a_tot * 1e-6)
+        print(f"  at {lpm:>2} L/min: jet speed {v:4.1f} m/s, pressure used by the jets {1000 * v * v / 2 / 1e5:4.2f} bar")
+
+
+def verify(solid, voids, jets, jet_pts, pad_cuts):
+    """Check that the water path is one connected cavity and that every jet sprays freely."""
+    print("verifying water path ...")
+    n_cav = len(voids.decompose())
+    print(f"  internal cavity pieces (inlet + chamber + all channels): {n_cav} -> "
+          + ("OK, one connected network" if n_cav == 1 else "PROBLEM: disconnected channels"))
+    fed = sum(1 for j in jets if not (j ^ voids).is_empty())
+    print(f"  jets touching the cavity: {fed}/{len(jets)}")
+    # a jet is open if its tip lies outside the solid, and its spray line to the axis is clear
+    blocked = 0
+    for c, d in jet_pts:
+        tip = c + d * (wall_reach(c, d) + 1.0)
+        start = c + d * (wall_reach(c, d) + 0.6)
+        dist = max(np.hypot(start[0], start[1]) - 1.0, 1.0)
+        line = oriented_cylinder(start, d, dist, 0.15, 6)
+        tip_in = not (Manifold.sphere(0.1, 8).translate(tuple(tip)) ^ solid).is_empty()
+        line_hit = not (line ^ solid).is_empty()
+        if tip_in or line_hit:
+            blocked += 1
+            print(f"    blocked jet at {np.round(c, 1)} ({'tip inside wall' if tip_in else 'spray hits a strut'})")
+    print(f"  jets with a clear spray to the centre: {len(jets) - blocked}/{len(jets)}")
+    leak = union(pad_cuts) ^ voids
+    print("  suction-cup keyholes isolated from water: " + ("OK" if leak.is_empty() else "PROBLEM"))
+    ok = n_cav == 1 and fed == len(jets) and blocked == 0 and leak.is_empty()
+    print("  RESULT:", "all checks passed" if ok else "FAILED")
+    return ok
 
 
 if __name__ == "__main__":
