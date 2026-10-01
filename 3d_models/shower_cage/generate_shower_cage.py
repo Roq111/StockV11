@@ -4,7 +4,7 @@ Shower cage head generator -> STL.
 Geometry (all units in mm):
   * Male thread G1/2" (BSPP, standard shower hose): major Ø20.955, 14 TPI (pitch 1.814), 55° profile
   * Body section 1: Ø60 for 120 mm (right under the thread), with a gradual neck flare
-  * Body section 2: Ø110 for 70 mm
+  * Body section 2: Ø90 for 70 mm
   * Lattice of HOLLOW flat (elliptical section) struts, two opposite helix families -> diamond
     pattern, fed from a hub chamber under the thread and closed by a hollow flat bottom ring.
   * Many Ø0.8 high-pressure jet holes: on the inner side of every strut (pointing at the axis)
@@ -25,7 +25,7 @@ THREAD_LEN = 12.0
 BORE_D = 10.0                 # water inlet bore through the thread
 
 D1, L1 = 60.0, 120.0          # first section: diameter, length
-D2, L2 = 110.0, 70.0          # second section: diameter, length
+D2, L2 = 90.0, 70.0           # second section: diameter, length
 BODY_LEN = L1 + L2
 
 # flat struts: thin in the radial direction, wide tangentially
@@ -42,9 +42,11 @@ TWIST = math.radians(150)     # rotation of each strut over the body length
 # High pressure needs a SMALL total jet area: at a fixed supply flow the jet speed is
 # v = Q / (Cd * A_total). ~20-25 mm2 gives >10 m/s at 10 L/min (see engineering_check()).
 JET_D = 0.8                   # printable on FDM with a 0.4 nozzle
-JET_SPACING = 19.0            # mm along each strut
-JET_CLEAR = 9.0               # skip jets this close to a crossing strut
-RING_JETS_PER_ROW = 16        # ring has 2 staggered horizontal rows
+JET_BAND = 10.0               # mm: height of each coverage band along the body
+JETS_PER_BAND = 4             # jets per band, spread around the circumference
+JET_Z_MAX = 160.0             # above this the struts are bunched into the neck
+JET_CLEAR = 7.0               # pre-filter: skip spots this close to a crossing strut
+RING_JETS_PER_ROW = 10        # ring has 2 staggered horizontal rows
 RING_JET_Z = (-2.0, 2.0)          # both inside the ring channel height
 
 # suction-cup keyhole pads (for mushroom-head cups: head ≤7 mm, neck ≤4 mm)
@@ -228,22 +230,56 @@ def main():
     voids = union(channels + [chamber, bore])
 
     print("drilling jets ...")
-    jets, jet_pts = [], []
+    # candidate jet spots every 3 mm along every strut, away from crossings
+    cands = []
     for pi, p in enumerate(paths):
         seg = np.linalg.norm(np.diff(p, axis=0), axis=1)
         s = np.concatenate([[0], np.cumsum(seg)])
         others = np.vstack([q for qi, q in enumerate(paths) if qi != pi] + [ring])
-        for sv in np.arange(30.0, s[-1] - 8, JET_SPACING):
+        for sv in np.arange(3.0, s[-1] - 8, 3.0):
             c = np.array([np.interp(sv, s, p[:, i]) for i in range(3)])
-            if np.min(np.linalg.norm(others - c, axis=1)) < JET_CLEAR:
+            dists = np.linalg.norm(others - c, axis=1)
+            if c[2] > JET_Z_MAX:
+                continue
+            if dists.min() < 2.5:
+                # at a crossing node: both channels merge there, drill from the node centre
+                c = (c + others[dists.argmin()]) / 2
+            elif dists.min() < JET_CLEAR:
                 continue
             # point at the axis, but perpendicular to the strut so the hole crosses the wall squarely
             i = np.searchsorted(s, sv); tan_v = p[min(i, len(p) - 1)] - p[max(i - 1, 0)]
             tan_v /= np.linalg.norm(tan_v)
             inward = np.array([-c[0], -c[1], 0.0])
             inward -= np.dot(inward, tan_v) * tan_v
-            inward /= np.linalg.norm(inward)
-            jets.append(jet(c, inward)); jet_pts.append((c, inward))
+            cands.append((c, inward / np.linalg.norm(inward)))
+
+    # even coverage of the whole inside: every height band gets JETS_PER_BAND jets spread
+    # around the circumference (band start angle advances by the golden angle)
+    jets, jet_pts = [], []
+    golden = math.pi * (3 - math.sqrt(5))
+    z_edges = np.arange(5.0, JET_Z_MAX + 1e-6, JET_BAND)
+    for b, (z_lo, z_hi) in enumerate(zip(z_edges[:-1], z_edges[1:])):
+        band = [cd for cd in cands if z_lo <= cd[0][2] < z_hi]
+        used, rejected = [], set()
+        for k in range(JETS_PER_BAND):
+            target = b * golden + 2 * math.pi * k / JETS_PER_BAND
+            best = None
+            for idx, (c, d) in enumerate(band):
+                if idx in used or idx in rejected or any(np.linalg.norm(c - band[u][0]) < 6.0 for u in used):
+                    continue
+                err = abs((math.atan2(c[1], c[0]) - target + math.pi) % (2 * math.pi) - math.pi)
+                if best is None or err < best[0]:
+                    best = (err, idx)
+            while best is not None and not jet_is_clear(solid, *band[best[1]]):
+                rejected.add(best[1])   # tip inside a neighbour strut or spray blocked -> next best
+                best = min(((abs((math.atan2(c[1], c[0]) - target + math.pi) % (2 * math.pi) - math.pi), idx)
+                            for idx, (c, d) in enumerate(band)
+                            if idx not in used and idx not in rejected
+                            and all(np.linalg.norm(c - band[u][0]) >= 6.0 for u in used)), default=None)
+            if best is not None:
+                used.append(best[1])
+                c, d = band[best[1]]
+                jets.append(jet(c, d)); jet_pts.append((c, d))
     n_strut_jets = len(jets)
 
     strut_ends = np.array([p[-1] for p in paths])
@@ -259,6 +295,8 @@ def main():
     print(f"  {len(jets)} jets ({n_strut_jets} on struts, {len(jets) - n_strut_jets} on ring), "
           f"total area {jet_area:.0f} mm2 vs inlet {math.pi * (BORE_D / 2) ** 2:.0f} mm2")
 
+    np.savetxt("jets.csv", [[*c, *d] for c, d in jet_pts], delimiter=",", fmt="%.2f",
+               header="x,y,z,dir_x,dir_y,dir_z (mm; jet centre on the channel axis + spray direction)")
     verify(solid, voids, jets, jet_pts, pad_cuts)
     engineering_check()
     jet_performance(len(jets))
@@ -312,6 +350,17 @@ def jet_performance(n_jets):
         print(f"  at {lpm:>2} L/min: jet speed {v:4.1f} m/s, pressure used by the jets {1000 * v * v / 2 / 1e5:4.2f} bar")
 
 
+def jet_is_clear(solid, c, d):
+    """True if the jet's exit lies outside the solid and its spray line to the axis is free."""
+    reach = wall_reach(c, d)
+    tip = c + d * (reach + 1.0)
+    start = c + d * (reach + 0.6)
+    dist = max(np.hypot(start[0], start[1]) - 1.0, 1.0)
+    line = oriented_cylinder(start, d, dist, 0.15, 6)
+    tip_in = not (Manifold.sphere(0.1, 8).translate(tuple(tip)) ^ solid).is_empty()
+    return not tip_in and (line ^ solid).is_empty()
+
+
 def verify(solid, voids, jets, jet_pts, pad_cuts):
     """Check that the water path is one connected cavity and that every jet sprays freely."""
     print("verifying water path ...")
@@ -323,19 +372,19 @@ def verify(solid, voids, jets, jet_pts, pad_cuts):
     # a jet is open if its tip lies outside the solid, and its spray line to the axis is clear
     blocked = 0
     for c, d in jet_pts:
-        tip = c + d * (wall_reach(c, d) + 1.0)
-        start = c + d * (wall_reach(c, d) + 0.6)
-        dist = max(np.hypot(start[0], start[1]) - 1.0, 1.0)
-        line = oriented_cylinder(start, d, dist, 0.15, 6)
-        tip_in = not (Manifold.sphere(0.1, 8).translate(tuple(tip)) ^ solid).is_empty()
-        line_hit = not (line ^ solid).is_empty()
-        if tip_in or line_hit:
+        if not jet_is_clear(solid, c, d):
             blocked += 1
-            print(f"    blocked jet at {np.round(c, 1)} ({'tip inside wall' if tip_in else 'spray hits a strut'})")
+            print(f"    blocked jet at {np.round(c, 1)}")
     print(f"  jets with a clear spray to the centre: {len(jets) - blocked}/{len(jets)}")
+    zs = np.array([c[2] for c, _ in jet_pts])
+    bands = np.arange(-5.0, JET_Z_MAX + 1e-6, JET_BAND)
+    counts = np.histogram(zs, bands)[0]
+    empty = [f"{lo:.0f}-{lo + JET_BAND:.0f}" for lo, n in zip(bands[:-1], counts) if n == 0]
+    print(f"  jets per {JET_BAND:.0f} mm height band (bottom->top): {counts.tolist()}")
+    print("  full-height coverage: " + ("OK, every band has jets" if not empty else "GAPS at z=" + ", ".join(empty)))
     leak = union(pad_cuts) ^ voids
     print("  suction-cup keyholes isolated from water: " + ("OK" if leak.is_empty() else "PROBLEM"))
-    ok = n_cav == 1 and fed == len(jets) and blocked == 0 and leak.is_empty()
+    ok = not empty and n_cav == 1 and fed == len(jets) and blocked == 0 and leak.is_empty()
     print("  RESULT:", "all checks passed" if ok else "FAILED")
     return ok
 
